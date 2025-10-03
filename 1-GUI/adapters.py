@@ -1,10 +1,6 @@
-# adapters.py
 from dataclasses import dataclass
-from abc import ABC, abstractmethod
-from typing import Union
+from typing import Any
 from PIL import Image
-from hf_client import HFClient
-from decorators import require_token
 
 @dataclass
 class ModelInfo:
@@ -12,31 +8,29 @@ class ModelInfo:
     task: str
     description: str
 
-class BaseAdapter(ABC):
-    """Abstract base demonstrating polymorphism + overriding."""
-    def __init__(self, client: HFClient, info: ModelInfo):
+class BaseAdapter:
+    def __init__(self, client, model_info: ModelInfo):
         self.client = client
-        self.info = info
-
-    @abstractmethod
-    def run(self, **kwargs) -> Union[str, Image.Image]:
-        ...
+        self.model_info = model_info
 
     def info_text(self) -> str:
-        return f"Model: {self.info.model_id}\nCategory: {self.info.task}\n\n{self.info.description}"
+        return (
+            f"Model ID: {self.model_info.model_id}\n"
+            f"Task: {self.model_info.task}\n\n"
+            f"{self.model_info.description}\n"
+        )
+
+    def run(self, *args, **kwargs):
+        raise NotImplementedError
 
 class TextToImageAdapter(BaseAdapter):
-    @require_token
-    def run(self, **kwargs) -> Image.Image:
-        prompt = (kwargs.get("prompt") or "").strip()
-        if not prompt:
-            raise ValueError("Please type a prompt in the input box.")
-        return self.client.text_to_image(self.info.model_id, prompt)
+    def run(self, prompt: str, **params) -> Image.Image:
+        return self.client.text_to_image(self.model_info.model_id, prompt, **params)
 
 class ImageClassificationAdapter(BaseAdapter):
-    @require_token
-    def run(self, **kwargs) -> str:
-        img_bytes = kwargs.get("image_bytes")
-        if not img_bytes:
-            raise ValueError("Please choose an image (Browse) first.")
-        return self.client.image_classification(self.info.model_id, img_bytes)
+    def run(self, image_bytes: bytes, top_k: int = 5) -> str:
+        preds = self.client.image_classification(self.model_info.model_id, image_bytes, top_k=top_k)
+        if not preds:
+            return "No predictions."
+        lines = [f"{i+1}. {p['label']} — {p['score']:.3f}" for i, p in enumerate(preds)]
+        return "\n".join(lines)

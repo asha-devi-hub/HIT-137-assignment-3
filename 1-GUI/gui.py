@@ -25,17 +25,19 @@ class TkAIApp(tk.Tk, ThemingMixin, FileDialogMixin):
     """
 
     MODELS: Dict[str, ModelInfo] = {
-        "Text-to-Image": ModelInfo(
-            model_id="stabilityai/sdxl-turbo",
-            task="Vision (Text-to-Image)",
-            description="SDXL-Turbo: fast text-to-image. Input: prompt → Output: image."
-        ),
-        "Image Classification": ModelInfo(
-            model_id="google/vit-base-patch16-224",
-            task="Vision (Image Classification)",
-            description="ViT Base (16×224) image classifier. Input: image → Output: top labels."
-        ),
-    }
+    "Text-to-Image": ModelInfo(
+        model_id="aiyouthalliance/Free-Image-Generation",
+        task="Vision (Text-to-Image)",
+        description="Free-Image-Generation (SD 1.5 fine-tune, CC0 outputs)."
+    ),
+    "Image Classification": ModelInfo(
+        model_id="facebook/deit-tiny-patch16-224",
+        task="Vision (Image Classification)",
+        description="DeiT-Tiny 224 (ImageNet-1k) — fast, local"
+    ),
+}
+
+
 
     def __init__(self):
         super().__init__()
