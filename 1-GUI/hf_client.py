@@ -1,65 +1,60 @@
 # hf_client.py
-import os, io, json
-from typing import Optional, Dict
+import io
+from typing import List, Dict, Any
 from PIL import Image
-import requests
+import torch
+from diffusers import DiffusionPipeline
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+
+_T2I_PIPE = None
+_CLS_PROC = None
+_CLS_MODEL = None
+
+def _device_dtype():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float16 if device == "cuda" else torch.float32
+    return device, dtype
+
+def _get_t2i_pipe(model_id: str):
+    global _T2I_PIPE
+    if _T2I_PIPE is None:
+        device, dtype = _device_dtype()
+        _T2I_PIPE = DiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype).to(device)
+        try:
+            _T2I_PIPE.enable_vae_slicing()
+            _T2I_PIPE.enable_attention_slicing()
+        except Exception:
+            pass
+    return _T2I_PIPE
 
 class HFClient:
-    def __init__(self, token: Optional[str] = None):
-        self._token = token or os.getenv("HUGGINGFACEHUB_API_TOKEN", "").strip()
+    def __init__(self, token: str = ""):
+        self.token = token or ""
 
-    @property
-    def token(self) -> str:
-        return self._token
+    # --- Text -> Image (uses aiyouthalliance/Free-Image-Generation) ---
+    def text_to_image(self, model_id: str, prompt: str, **gen_kwargs) -> Image.Image:
+        pipe = _get_t2i_pipe(model_id)
+        # sensible defaults; tweak if you want
+        steps = int(gen_kwargs.get("num_inference_steps", 28))
+        guidance = float(gen_kwargs.get("guidance_scale", 7.5))
+        neg = gen_kwargs.get("negative_prompt")  # optional
+        out = pipe(prompt, num_inference_steps=steps, guidance_scale=guidance, negative_prompt=neg)
+        return out.images[0]
 
-    def _json_headers(self) -> Dict[str, str]:
-        h = {"Content-Type": "application/json"}
-        if self._token:
-            h["Authorization"] = f"Bearer {self._token}"
-        return h
-
-    def _bin_headers(self) -> Dict[str, str]:
-        h = {}
-        if self._token:
-            h["Authorization"] = f"Bearer {self._token}"
-        return h
-
-    # ---------- NEW: Text generation ----------
-    def text_generation(self, model_id: str, prompt: str, max_new_tokens: int = 60) -> str:
-        url = f"https://api-inference.huggingface.co/models/{model_id}"
-        payload = {"inputs": prompt, "parameters": {"max_new_tokens": max_new_tokens}}
-        r = requests.post(url, headers=self._json_headers(), data=json.dumps(payload), timeout=120)
-        r.raise_for_status()
-        out = r.json()
-        if isinstance(out, list) and out and "generated_text" in out[0]:
-            return out[0]["generated_text"]
-        if isinstance(out, dict) and "generated_text" in out:
-            return out["generated_text"]
-        return json.dumps(out, indent=2)
-
-    # ---------- Keep these (already in your file) ----------
-    def text_to_image(self, model_id: str, prompt: str) -> Image.Image:
-        url = f"https://api-inference.huggingface.co/models/{model_id}"
-        r = requests.post(url, headers=self._json_headers(),
-                          data=json.dumps({"inputs": prompt}), timeout=180)
-        if r.status_code == 403:
-            raise RuntimeError("403 Forbidden: model is gated or not available to your account/tier.")
-        r.raise_for_status()
-        ctype = r.headers.get("content-type", "")
-        if ctype.startswith("image/"):
-            return Image.open(io.BytesIO(r.content)).convert("RGB")
-        try:
-            err = r.json()
-        except Exception:
-            err = {"error": "Unknown error from the Inference API."}
-        raise RuntimeError(err.get("error") or str(err))
-
-    def image_classification(self, model_id: str, image_bytes: bytes) -> str:
-        url = f"https://api-inference.huggingface.co/models/{model_id}"
-        r = requests.post(url, headers=self._bin_headers(), data=image_bytes, timeout=120)
-        r.raise_for_status()
-        out = r.json()
-        if isinstance(out, list) and out:
-            topk = sorted(out, key=lambda x: x.get("score", 0), reverse=True)[:5]
-            return "Top predictions:\n" + "\n".join(f"- {x['label']} ({x['score']:.3f})" for x in topk)
-        return json.dumps(out, indent=2)
+    # --- Image Classification (unchanged, local) ---
+    def image_classification(self, model_id: str, image_bytes: bytes, top_k: int = 5) -> List[Dict[str, Any]]:
+        global _CLS_PROC, _CLS_MODEL
+        if _CLS_PROC is None or _CLS_MODEL is None:
+            _CLS_PROC = AutoImageProcessor.from_pretrained(model_id)
+            _CLS_MODEL = AutoModelForImageClassification.from_pretrained(model_id)
+            _CLS_MODEL.eval()
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        inputs = _CLS_PROC(images=img, return_tensors="pt")
+        with torch.no_grad():
+            logits = _CLS_MODEL(**inputs).logits
+        probs = logits.softmax(-1)[0]
+        k = min(top_k, probs.shape[-1])
+        values, indices = torch.topk(probs, k=k)
+        id2label = _CLS_MODEL.config.id2label
+        return [{"label": id2label[int(i.item())], "score": float(v.item())}
+                for v, i in zip(values, indices)]
